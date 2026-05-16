@@ -7,6 +7,33 @@ function HomeView({ memories, addMemory }) {
   const [text, setText] = useState('');
   const [filter, setFilter] = useState('all');
   const [suggested, setSuggested] = useState(['+ design', '+ inspiration']);
+  const [aiResponse, setAiResponse] = useState(null);
+  const [isSearching, setIsSearching] = useState(false);
+
+  const isQuestion = (t) => {
+    const s = t.trim().toLowerCase();
+    if (!s) return false;
+    if (s.endsWith('?')) return true;
+    return /^(what|how|when|who|where|why|is |are |can |does |do |will |should |could |would |tell me|show me|find )/.test(s);
+  };
+
+  const questionMode = isQuestion(text);
+
+  const searchKnowledge = (query) => {
+    const stopwords = new Set(['the','and','for','with','that','this','from','what','how','when','who','where','why','is','are','can','does','will','do','a','an','in','on','of','to','i','my','your','have','has']);
+    const words = query.toLowerCase().replace(/[?!.,]/g, '').split(/\s+/).filter(w => w.length > 2 && !stopwords.has(w));
+    if (words.length === 0) return [];
+    return memories
+      .map(m => {
+        const haystack = [m.title, m.body || '', ...(m.tags || []), ...(m.aiTags || []), ...(m.todos ? m.todos.map(t => t.t) : [])].join(' ').toLowerCase();
+        const score = words.reduce((acc, w) => acc + (haystack.split(w).length - 1), 0);
+        return { m, score };
+      })
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map(({ m }) => m);
+  };
 
   // Live "AI" tag suggestion based on text
   useEffect(() => {
@@ -39,19 +66,43 @@ function HomeView({ memories, addMemory }) {
   const filtered = filter === 'all' ? memories : memories.filter(m => m.type === filter);
 
   const submit = () => {
-    if (!text.trim()) return;
-    const firstLine = text.split('\n')[0].slice(0, 60);
-    addMemory({
-      id: Date.now(),
-      type,
-      title: firstLine,
-      body: text.split('\n').slice(1).join('\n') || (type === 'todo' ? null : firstLine),
-      todos: type === 'todo' ? [{ t: firstLine, done: false }] : null,
-      tags: suggested.map(s => s.replace('+ ', '')).slice(0, 2),
-      aiTags: ['just-added'],
-      time: 'just now',
-    });
-    setText('');
+    if (!text.trim() || isSearching) return;
+    if (questionMode) {
+      setIsSearching(true);
+      const query = text;
+      setText('');
+      fetch('/api/ai/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: query, memories: memories.slice(0, 50) }),
+      })
+      .then(r => r.json())
+      .then(({ summary, relevantIndices }) => {
+        const ranked = (relevantIndices || []).map(i => memories[i]).filter(Boolean);
+        const results = ranked.length > 0 ? ranked : searchKnowledge(query);
+        setAiResponse({ query, summary, results });
+        setIsSearching(false);
+      })
+      .catch(() => {
+        const results = searchKnowledge(query);
+        setAiResponse({ query, summary: null, results });
+        setIsSearching(false);
+      });
+    } else {
+      const firstLine = text.split('\n')[0].slice(0, 60);
+      addMemory({
+        id: Date.now(),
+        type,
+        title: firstLine,
+        body: text.split('\n').slice(1).join('\n') || (type === 'todo' ? null : firstLine),
+        todos: type === 'todo' ? [{ t: firstLine, done: false }] : null,
+        tags: suggested.map(s => s.replace('+ ', '')).slice(0, 2),
+        aiTags: ['just-added'],
+        time: 'just now',
+      });
+      setText('');
+      setAiResponse(null);
+    }
   };
 
   return (
@@ -79,7 +130,7 @@ function HomeView({ memories, addMemory }) {
         <textarea
           className="composer-input"
           value={text}
-          onChange={e => setText(e.target.value)}
+          onChange={e => { setText(e.target.value); if (aiResponse) setAiResponse(null); }}
           rows={3}
           placeholder={
             type === 'note'     ? 'Catch a thought before it floats off…'
@@ -92,11 +143,20 @@ function HomeView({ memories, addMemory }) {
         />
         <div className="ai-line">
           <span className="ai-dot"></span>
-          <span>AI suggests:</span>
-          {suggested.map((s, i) => (
-            <button key={i} className="suggested-tag">{s}</button>
-          ))}
-          <span style={{ marginLeft: 'auto', color: 'var(--muted-2)' }}>⌘↵ to save</span>
+          {questionMode ? (
+            <>
+              <span>Brain 1.0 detects:</span>
+              <span className="mode-indicator question">question — will search your knowledge</span>
+            </>
+          ) : (
+            <>
+              <span>Brain 1.0 suggests:</span>
+              {suggested.map((s, i) => (
+                <button key={i} className="suggested-tag">{s}</button>
+              ))}
+            </>
+          )}
+          <span style={{ marginLeft: 'auto', color: 'var(--muted-2)' }}>⌘↵ to {questionMode ? 'ask' : 'save'}</span>
         </div>
         <div className="composer-actions">
           <button className="icon-mini" title="Add image"><Ic.Image/></button>
@@ -105,10 +165,86 @@ function HomeView({ memories, addMemory }) {
           <button className="icon-mini" title="Emoji"><Ic.Smile/></button>
           <button className="icon-mini" title="Set reminder"><Ic.Bell/></button>
           <div className="spacer"></div>
-          <button className="btn-ghost"><Ic.Sparkle/>Expand with AI</button>
-          <button className="btn-primary" onClick={submit}>Save memory<Ic.Arrow/></button>
+          {!questionMode && <button className="btn-ghost"><Ic.Sparkle/>Expand with Brain 1.0</button>}
+          <button className="btn-primary" onClick={submit} disabled={isSearching}>
+            {questionMode
+              ? isSearching
+                ? <><span className="ai-dot" style={{width:12,height:12,flexShrink:0}}></span>Searching…</>
+                : <><Ic.Search width={14} height={14}/>Ask my brain</>
+              : <>Save memory<Ic.Arrow/></>
+            }
+          </button>
         </div>
       </div>
+
+      {/* AI Response Panel */}
+      {(isSearching || aiResponse) && (
+        <div className="ai-response">
+          <div className="ai-line" style={{ borderTop: 0, padding: '0 0 12px' }}>
+            <span className="ai-dot"></span>
+            {isSearching ? (
+              <span>Brain 1.0 is thinking…</span>
+            ) : (
+              <>
+                <span>
+                  {aiResponse.results.length > 0
+                    ? `Found ${aiResponse.results.length} relevant ${aiResponse.results.length === 1 ? 'memory' : 'memories'} for:`
+                    : 'Nothing matched yet for:'}
+                </span>
+                <button onClick={() => setAiResponse(null)}
+                  style={{ marginLeft: 'auto', background: 'none', border: 0, color: 'var(--muted)', cursor: 'pointer', fontSize: 20, lineHeight: 1, padding: '0 2px' }}>
+                  ×
+                </button>
+              </>
+            )}
+          </div>
+          {aiResponse && (
+            <>
+              <div className="ai-response-query">"{aiResponse.query}"</div>
+              {aiResponse.summary && (
+                <div className="ai-summary">
+                  <div className="ai-summary-label">
+                    <span className="ai-dot" style={{width:10,height:10}}></span>
+                    Brain 1.0
+                  </div>
+                  <p>{aiResponse.summary}</p>
+                </div>
+              )}
+              {aiResponse.results.length > 0 && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10,
+                  fontFamily: 'var(--font-mono)', fontSize: 10.5,
+                  color: 'var(--muted-2)', letterSpacing: '0.08em', textTransform: 'uppercase',
+                }}>
+                  <span>{aiResponse.results.length} relevant {aiResponse.results.length === 1 ? 'memory' : 'memories'}</span>
+                  <span style={{ flex: 1, height: 1, background: 'var(--border-soft)' }}></span>
+                </div>
+              )}
+              {aiResponse.results.length > 0 ? (
+                <div className="know-list">
+                  {aiResponse.results.map(m => (
+                    <div key={m.id} className="know-row" data-type={m.type}>
+                      <span className="dot"></span>
+                      <div>
+                        <div className="row-title">{m.title}</div>
+                        <div className="row-snip">
+                          {m.body || (m.todos && m.todos.map(t => t.t).join(' · ')) || ''}
+                          {(m.tags || []).map(t => <span key={t} className="tag" style={{ marginLeft: 6 }}>#{t}</span>)}
+                        </div>
+                      </div>
+                      <div className="row-time">{m.time}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="ai-response-empty">
+                  Nothing in your knowledge matches yet. Try saving some related notes first, or rephrase your question.
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {/* Recent */}
       <div className="section-h">
@@ -298,7 +434,7 @@ function KnowledgeView({ memories, tags }) {
             </button>
           ))}
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border-soft)' }}>
-            <h3 style={{ marginBottom: 8 }}>AI-suggested</h3>
+            <h3 style={{ marginBottom: 8 }}>Brain 1.0 suggested</h3>
             <button className="tag-pill" style={{ color: 'var(--mint)' }}>
               <span className="sw" style={{ background: 'var(--mint)' }}></span> #morning-routine <span className="ct">new</span>
             </button>
@@ -345,7 +481,7 @@ function KnowledgeView({ memories, tags }) {
 }
 
 // ---------- PROFILE ----------
-function ProfileView() {
+function ProfileView({ user = {}, onLogout }) {
   const [notify, setNotify] = useState(true);
   const [autoTag, setAutoTag] = useState(true);
   const [resurface, setResurface] = useState(true);
@@ -383,8 +519,8 @@ function ProfileView() {
         <div>
           <div className="profile-card">
             <div className="avatar-lg">S</div>
-            <h2 className="profile-name">Sam Okonkwo</h2>
-            <div className="profile-handle">@sam · she/her · ✦ founding user</div>
+            <h2 className="profile-name">{user.name || 'Sam Okonkwo'}</h2>
+            <div className="profile-handle">@{((user.name || 'sam').split(' ')[0]).toLowerCase()} · ✦ founding user</div>
             <div className="profile-bio">
               Designer, plant collector, occasional baker. Building a quieter relationship with my own attention. ADHD, dx 2021 — this app is part of how I cope.
             </div>
@@ -393,6 +529,12 @@ function ProfileView() {
               <div className="p-stat"><div className="v">38</div><div className="l">days</div></div>
               <div className="p-stat"><div className="v">14</div><div className="l">tags</div></div>
             </div>
+            {onLogout && (
+              <button onClick={onLogout} className="btn-ghost"
+                style={{ width: '100%', justifyContent: 'center', marginTop: 14, fontSize: 12 }}>
+                Sign out
+              </button>
+            )}
           </div>
         </div>
 
